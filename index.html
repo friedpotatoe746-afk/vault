@@ -237,7 +237,7 @@ async function gh(path, opts = {}) {
 function show() {
   $('#setup').hidden = !!token;
   $('#app').hidden = !token;
-  if (token) loadRuns();
+  if (token) { loadRuns(); instantFiles(); }
 }
 
 $('#saveToken').onclick = async () => {
@@ -278,17 +278,20 @@ $('#save').onclick = async () => {
   const links = text.match(/https?:\/\/[^\s<>"']+/g) || [];
   if (!links.length) return toast('Paste a Discord link first', true);
   if (!links.some(l => /discordapp\.(com|net)/.test(l))) return toast('That isn\'t a Discord link — use Share → Copy Link in Discord', true);
-  const btn = $('#save'), hidden = $('#hidden').checked;
-  btn.disabled = true; btn.textContent = 'Sending…';
+  const hidden = $('#hidden').checked;
+  const inputs = { links: links.join('\n'), hidden: String(hidden) };
+  $('#links').value = '';
+  toast(`Saving ${links.length} file${links.length > 1 ? 's' : ''}${hidden ? ' hidden' : ''}…`);
+  setTimeout(loadRuns, 2500);
+  // Runs in the background so the next link can be pasted straight away. runJob resends the save
+  // if GitHub bumps it from the queue, so a link is never silently dropped.
   try {
-    await gh(`/actions/workflows/${WORKFLOW}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { links: links.join('\n'), hidden: String(hidden) } }) });
-    $('#links').value = '';
-    toast(`Saving ${links.length} file${links.length > 1 ? 's' : ''}${hidden ? ' hidden' : ''}…`);
-    setTimeout(loadRuns, 2500);
+    const { res } = await runJob(WORKFLOW, inputs);
+    loadRuns();
+    if (res.Failed?.length) toast(res.Failed[0], true);
   } catch (e) {
+    $('#links').value = [$('#links').value.trim(), ...links].filter(Boolean).join('\n'); // give the links back
     toast(e.message, true);
-  } finally {
-    btn.disabled = false; btn.textContent = $('#hidden').checked ? 'Save hidden' : 'Save to Proton';
   }
 };
 
@@ -413,42 +416,121 @@ function status(tab, text) {
   if (text) box.querySelector('.txt').textContent = text;
 }
 
-async function runManage(tab, inputs, label, { quiet = false } = {}) {
-  if (busy) { if (!quiet) toast('Wait for the current action to finish', true); return null; }
-  busy = true;
-  const started = Date.now();
-  const tick = () => status(tab, `${label}… ${Math.round((Date.now() - started) / 1000)}s (usually about 15 seconds)`);
-  tick();
-  const timer = setInterval(tick, 1000);
-  try {
-    const before = new Set((await gh(`/actions/workflows/${MANAGE}/runs?per_page=10`)).workflow_runs.map(r => r.id));
-    await gh(`/actions/workflows/${MANAGE}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs }) });
-    let run = null;
-    for (let i = 0; i < 90 && !run; i++) {
-      await sleep(1000);
-      run = (await gh(`/actions/workflows/${MANAGE}/runs?per_page=10`)).workflow_runs.find(r => !before.has(r.id));
-    }
-    if (!run) throw new Error('GitHub didn\'t start the job — try again.');
-    // Read the RESULT step as soon as GitHub fills it in — a few seconds before the run is marked done.
+// GitHub keeps only one job waiting in line for Proton: a newly queued job cancels the one already
+// waiting. So before sending a job, wait until nothing is waiting (running is fine), and if a job
+// still gets cancelled, send it again.
+async function waitForFreeQueue(onWait) {
+  for (let i = 0; i < 120; i++) {
+    const { workflow_runs } = await gh('/actions/runs?per_page=10');
+    if (!workflow_runs.some(r => ['queued', 'pending', 'waiting', 'requested'].includes(r.status))) return;
+    onWait?.();
+    await sleep(1500);
+  }
+}
+
+async function dispatch(workflow, inputs, onWait) {
+  await waitForFreeQueue(onWait);
+  const before = new Set((await gh(`/actions/workflows/${workflow}/runs?per_page=10`)).workflow_runs.map(r => r.id));
+  await gh(`/actions/workflows/${workflow}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs }) });
+  for (let i = 0; i < 90; i++) {
+    await sleep(1000);
+    const run = (await gh(`/actions/workflows/${workflow}/runs?per_page=10`)).workflow_runs.find(r => !before.has(r.id));
+    if (run) return run;
+  }
+  throw new Error('GitHub didn\'t start the job — check your connection and try again.');
+}
+
+// Sends a job and waits for its result, read as soon as GitHub fills in the RESULT steps.
+async function runJob(workflow, inputs, onWait) {
+  for (let attempt = 1; ; attempt++) {
+    const run = await dispatch(workflow, inputs, onWait);
     for (;;) {
       await sleep(1000);
       const [{ jobs }, latest] = await Promise.all([gh(`/actions/runs/${run.id}/jobs`), gh(`/actions/runs/${run.id}`)]);
       const res = resultFromSteps(jobs.flatMap(j => j.steps || []));
-      if (res) return { res, failedMsgs: res.Failed || [], ok: !(res.Failed || []).length };
+      if (res) { resultCache.set(run.id, res); return { res, run }; }
       if (latest.status === 'completed') {
-        if (latest.conclusion === 'cancelled') throw new Error('The job was cancelled — another save or action started. Try again.');
-        return { res: {}, failedMsgs: ['The job stopped without a result — open it on GitHub to see why.'], ok: false };
+        if (latest.conclusion === 'cancelled' && attempt < 4) break; // bumped from the queue: send again
+        if (latest.conclusion === 'cancelled') throw new Error('GitHub kept cancelling the job — try again in a minute.');
+        return { res: { Failed: ['The job stopped without a result — open it on GitHub to see why.'] }, run };
       }
-      if (Date.now() - started > 5 * 60_000) throw new Error('This is taking unusually long — try again in a bit.');
     }
+  }
+}
+
+async function runManage(tab, inputs, label, { quiet = false } = {}) {
+  if (busy) { if (!quiet) toast('Wait for the current action to finish', true); return null; }
+  busy = true;
+  const started = Date.now();
+  let waiting = false;
+  const tick = () => status(tab, waiting ? `Waiting for another job to start… ${Math.round((Date.now() - started) / 1000)}s`
+    : `${label}… ${Math.round((Date.now() - started) / 1000)}s (usually about 15 seconds)`);
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    const { res } = await runJob(MANAGE, inputs, () => { waiting = true; });
+    return { res, failedMsgs: res.Failed || [], ok: !(res.Failed || []).length };
   } catch (e) {
     if (!quiet) toast(e.message, true);
-    return null;
+    return { res: {}, failedMsgs: [e.message], ok: false, error: true };
   } finally {
     clearInterval(timer);
     status(tab, '');
     busy = false;
   }
+}
+
+// ------------------------------------------------------------ instant lists
+// Every job sends back the lists it knows (Files after saves / list / hide / unhide; hidden ones,
+// with previews and a PIN fingerprint, only after the right PIN). Reading the newest finished
+// results takes about a second, so lists show at once — then a background job freshens them.
+
+const resultCache = new Map(); // run id -> decoded result (runs never change once finished)
+
+async function newestResults(limit = 8) {
+  const { workflow_runs } = await gh(`/actions/runs?per_page=${limit}&status=completed`);
+  const out = [];
+  await Promise.all(workflow_runs.map(async run => {
+    if (!resultCache.has(run.id)) {
+      try { resultCache.set(run.id, resultFromSteps((await gh(`/actions/runs/${run.id}/jobs`)).jobs.flatMap(j => j.steps || [])) || {}); }
+      catch { return; }
+    }
+    out.push({ run, res: resultCache.get(run.id), at: new Date(run.updated_at).getTime() });
+  }));
+  return out.sort((a, b) => b.at - a.at);
+}
+
+async function instantFiles() {
+  try {
+    const hit = (await newestResults()).find(x => parseList(x.res, 'List'));
+    if (hit && hit.at > filesAt) {
+      lists.files = parseList(hit.res, 'List');
+      filesAt = hit.at;
+      $('#filesInfo').textContent = `${lists.files.length} file${lists.files.length === 1 ? '' : 's'} · updated ${ago(hit.run.updated_at)}`;
+      saveFilesCache();
+      renderList('files');
+    }
+  } catch {}
+}
+
+async function sha256Hex(text) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Shows the newest hidden list straight away if this PIN matches the fingerprint stored with it.
+async function instantHidden(pin) {
+  try {
+    const results = await newestResults(15);
+    const hit = results.find(x => parseList(x.res, 'HiddenList') && x.res.PinCheck);
+    if (!hit || await sha256Hex(`${hit.res.PinCheck.salt}:${pin}`) !== hit.res.PinCheck.hash) return false;
+    lists.hidden = parseList(hit.res, 'HiddenList');
+    previews = {};
+    for (const x of [...results].reverse()) Object.assign(previews, x.res.Previews || {}); // newest wins
+    $('#hiddenInfo').textContent = `${lists.hidden.length} hidden file${lists.hidden.length === 1 ? '' : 's'} · updated ${ago(hit.run.updated_at)}`;
+    renderList('hidden');
+    return true;
+  } catch { return false; }
 }
 
 function saveFilesCache() {
@@ -496,10 +578,13 @@ const parseList = (res, title) => { try { return res[title] ? JSON.parse(res[tit
 let filesAt = 0; // when the files list was last loaded
 
 async function refreshFiles(opts) {
-  const r = await runManage('files', { action: 'list' }, 'Loading your files', opts);
+  const r = await runManage('files', { action: 'list' }, lists.files.length ? 'Checking for changes' : 'Loading your files', opts);
   if (!r) return;
   const list = parseList(r.res, 'List');
-  if (!list) return opts?.quiet || toast(r.failedMsgs[0] || 'Couldn\'t load the list', true);
+  if (!list) {
+    $('#filesInfo').textContent = lists.files.length ? 'Couldn\'t check for changes — tap Refresh' : 'Couldn\'t load your files — tap Refresh';
+    return opts?.quiet || toast(r.failedMsgs[0] || 'Couldn\'t load the list', true);
+  }
   lists.files = list;
   for (const n of [...picked.files]) if (!list.some(f => f.n === n)) picked.files.delete(n); // keep ticks
   filesAt = Date.now();
@@ -508,17 +593,18 @@ async function refreshFiles(opts) {
   renderList('files');
 }
 
-async function refreshHidden() {
-  const r = await runManage('hidden', { action: 'list-hidden', pin: hiddenPin }, 'Loading hidden files');
+async function refreshHidden(opts) {
+  const r = await runManage('hidden', { action: 'list-hidden', pin: hiddenPin }, lists.hidden.length ? 'Checking for changes' : 'Loading hidden files', opts);
   if (!r) return false;
   const list = parseList(r.res, 'HiddenList');
   if (!list) {
-    toast(r.failedMsgs[0] || 'Couldn\'t load hidden files', true);
-    if (r.failedMsgs.some(m => /wrong pin/i.test(m))) lockHidden();
+    if (r.failedMsgs.some(m => /wrong pin/i.test(m))) { toast('Wrong PIN', true); lockHidden(); return false; }
+    $('#hiddenInfo').textContent = 'Couldn\'t check for changes — tap Refresh';
+    if (!opts?.quiet) toast(r.failedMsgs[0] || 'Couldn\'t load hidden files', true);
     return false;
   }
   lists.hidden = list;
-  previews = r.res.Previews || {};
+  previews = { ...previews, ...(r.res.Previews || {}) };
   picked.hidden.clear();
   $('#hiddenInfo').textContent = `${list.length} hidden file${list.length === 1 ? '' : 's'}`;
   renderList('hidden');
@@ -529,23 +615,25 @@ async function moveSelected(tab) {
   const names = [...picked[tab]];
   if (!names.length) return;
   const hide = tab === 'files';
-  const r = await runManage(tab, { action: hide ? 'hide' : 'unhide', names: names.join('\n'), pin: hide ? '' : hiddenPin },
+  const r = await runManage(tab, { action: hide ? 'hide' : 'unhide', names: names.join('\n'), pin: hiddenPin },
     `${hide ? 'Hiding' : 'Unhiding'} ${names.length} file${names.length === 1 ? '' : 's'}`);
   if (!r) return;
   if (r.failedMsgs.length) toast(r.failedMsgs[0], true);
   const done = parseInt(r.res.Done?.[0] || '0', 10);
-  if (done) {
-    toast(`${done} file${done === 1 ? '' : 's'} ${hide ? 'hidden' : 'unhidden'}`);
-    // Update both lists locally instead of waiting for another minute-long refresh.
-    const moved = lists[tab].filter(f => picked[tab].has(f.n));
-    lists[tab] = lists[tab].filter(f => !picked[tab].has(f.n));
-    const other = hide ? 'hidden' : 'files';
-    if (hide ? hiddenPin : true) lists[other].push(...moved);
-    picked[tab].clear();
-    renderList(tab);
-    if (hide ? hiddenPin : true) renderList(other);
-    saveFilesCache();
-  }
+  if (!done) return;
+  toast(`${done} file${done === 1 ? '' : 's'} ${hide ? 'hidden' : 'unhidden'}`);
+  picked[tab].clear();
+  // The job sends both lists as they are now; fall back to updating locally if one is missing.
+  const files = parseList(r.res, 'List'), hidden = parseList(r.res, 'HiddenList');
+  const moved = lists[tab].filter(f => names.includes(f.n));
+  lists.files = files || (hide ? lists.files.filter(f => !names.includes(f.n)) : [...lists.files, ...moved]);
+  if (hiddenPin) lists.hidden = hidden || (hide ? [...lists.hidden, ...moved] : lists.hidden.filter(f => !names.includes(f.n)));
+  filesAt = Date.now();
+  saveFilesCache();
+  renderList('files');
+  if (hiddenPin) renderList('hidden');
+  // Newly hidden files need previews made; fetch them quietly in the background.
+  if (hide && hiddenPin) refreshHidden({ quiet: true });
 }
 
 // Hidden previews live in memory only and are dropped on lock.
@@ -579,9 +667,13 @@ $('#lock').onclick = () => { lockHidden(); toast('Hidden files locked'); };
 $('#unlock').onclick = async () => {
   const pin = $('#pin').value.trim();
   if (!pin) return $('#pin').focus();
+  $('#unlock').disabled = true;
+  const instant = await instantHidden(pin);
+  $('#unlock').disabled = false;
   hiddenPin = pin;
   $('#pinBox').hidden = true;
   $('#hiddenArea').hidden = false;
+  if (instant) { refreshHidden({ quiet: true }); return; } // shown already; freshen in the background
   $('#hiddenInfo').textContent = '';
   if (!(await refreshHidden())) lockHidden();
 };
@@ -598,10 +690,12 @@ try {
   }
 } catch {}
 
-// Opening the Files tab refreshes the list in the background if it's more than a minute old,
-// so the saved copy shows instantly and quietly updates.
-document.querySelector('.tabs [data-tab="files"]').addEventListener('click', () => {
-  if (token && !busy && Date.now() - filesAt > 60_000) refreshFiles({ quiet: true });
+// Opening the Files tab shows the newest known list at once and, if it's over a minute old,
+// checks for changes in the background.
+document.querySelector('.tabs [data-tab="files"]').addEventListener('click', async () => {
+  if (!token) return;
+  await instantFiles();
+  if (!busy && Date.now() - filesAt > 60_000) refreshFiles({ quiet: true });
 });
 
 // Leaving the page for a couple of minutes locks hidden files again.
