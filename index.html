@@ -107,6 +107,16 @@
   #tab-hidden .status .spin { border-top-color: #d4892b; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .pin { text-align: center; letter-spacing: .4em; font-size: 22px; }
+
+  /* hidden previews */
+  .item.with-pv { grid-template-columns: auto auto 1fr; }
+  .pv { width: 64px; height: 48px; border-radius: 8px; overflow: hidden; background: var(--panel-2); display: grid; place-items: center; flex: none; }
+  .pv img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .pv .glyph { font: 700 10px ui-monospace, monospace; color: var(--muted); letter-spacing: .05em; }
+  .pv-modal { position: fixed; inset: 0; z-index: 20; background: rgba(5,6,9,.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; }
+  .pv-modal img { width: min(480px, 92vw); border-radius: 12px; image-rendering: auto; }
+  .pv-modal .cap { color: #eceef3; font-weight: 600; font-size: 14px; text-align: center; overflow-wrap: anywhere; }
+  .pv-modal .cap.sub { font-weight: 400; font-size: 12.5px; color: #8b91a1; }
 </style>
 </head>
 <body>
@@ -181,6 +191,12 @@
     <p class="hint" style="text-align:center;margin-top:18px"><button class="link-btn" id="forget">Disconnect this device</button></p>
   </section>
 </main>
+
+<div id="pvModal" class="pv-modal" hidden>
+  <img id="pvImg" alt="">
+  <div id="pvName" class="cap"></div>
+  <div class="cap sub">Preview only · watch it on the full vault site (PC on) · tap to close</div>
+</div>
 
 <script>
 const OWNER = 'friedpotatoe746-afk', REPO = 'discord-vault-saver', WORKFLOW = 'save.yml';
@@ -300,9 +316,19 @@ function decodeResult(b64) {
   } catch { return {}; }
 }
 
+// Results are split across steps named "RESULT:1:<data>" … "RESULT:8:<data>" (older runs used a
+// single "RESULT:<data>"). Before a step runs, its name is the unfilled "${{ … }}" template, which
+// these patterns don't match — so null means "not ready yet".
+function resultFromSteps(steps) {
+  const chunks = steps.map(s => /^RESULT:(\d):([A-Za-z0-9_-]*)$/.exec(s.name)).filter(Boolean);
+  if (chunks.length) return chunks.length < 8 ? null : decodeResult(chunks.sort((a, b) => a[1] - b[1]).map(m => m[2]).join(''));
+  const old = steps.find(s => /^RESULT:[A-Za-z0-9_-]+$/.test(s.name));
+  return old ? decodeResult(old.name.slice(7)) : null;
+}
+
 async function resultOf(run) {
   const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
-  return decodeResult(jobs.flatMap(j => j.steps || []).find(s => /^RESULT:[A-Za-z0-9_-]+$/.test(s.name))?.name.slice(7));
+  return resultFromSteps(jobs.flatMap(j => j.steps || [])) || {};
 }
 
 async function resultLines(run) {
@@ -407,13 +433,8 @@ async function runManage(tab, inputs, label, { quiet = false } = {}) {
     for (;;) {
       await sleep(1000);
       const [{ jobs }, latest] = await Promise.all([gh(`/actions/runs/${run.id}/jobs`), gh(`/actions/runs/${run.id}`)]);
-      // Before the step runs GitHub shows its name as the unfilled "${{ … }}" template, so only
-      // accept a name that is RESULT: followed by actual base64 data.
-      const step = jobs.flatMap(j => j.steps || []).find(s => /^RESULT:[A-Za-z0-9_-]+$/.test(s.name));
-      if (step) {
-        const res = decodeResult(step.name.slice(7));
-        return { res, failedMsgs: res.Failed || [], ok: !(res.Failed || []).length };
-      }
+      const res = resultFromSteps(jobs.flatMap(j => j.steps || []));
+      if (res) return { res, failedMsgs: res.Failed || [], ok: !(res.Failed || []).length };
       if (latest.status === 'completed') {
         if (latest.conclusion === 'cancelled') throw new Error('The job was cancelled — another save or action started. Try again.');
         return { res: {}, failedMsgs: ['The job stopped without a result — open it on GitHub to see why.'], ok: false };
@@ -446,8 +467,12 @@ function renderList(tab) {
   box.innerHTML = items.length ? '' : `<div class="empty">${tab === 'files' ? 'No files.' : 'No hidden files.'}</div>`;
   for (const f of items) {
     const row = document.createElement('label');
-    row.className = 'item' + (picked[tab].has(f.n) ? ' sel' : '');
-    row.innerHTML = `<input type="checkbox" ${picked[tab].has(f.n) ? 'checked' : ''}><div><div class="n"></div><div class="d"></div></div>`;
+    const pv = tab === 'hidden' ? previews[f.n] : null;
+    row.className = 'item' + (tab === 'hidden' ? ' with-pv' : '') + (picked[tab].has(f.n) ? ' sel' : '');
+    row.innerHTML = `<input type="checkbox" ${picked[tab].has(f.n) ? 'checked' : ''}>` +
+      (tab === 'hidden' ? `<span class="pv">${pv ? `<img alt="" src="data:image/jpeg;base64,${pv}">` : `<span class="glyph">${esc(extOf(f.n))}</span>`}</span>` : '') +
+      `<div><div class="n"></div><div class="d"></div></div>`;
+    if (pv) row.querySelector('.pv').onclick = e => { e.preventDefault(); openPreview(f.n, pv); }; // don't toggle the tick
     row.querySelector('.n').textContent = f.n;
     row.querySelector('.d').textContent = `${fmtSize(f.s)} · ${ago(f.m)}`;
     row.querySelector('input').onchange = e => {
@@ -493,6 +518,7 @@ async function refreshHidden() {
     return false;
   }
   lists.hidden = list;
+  previews = r.res.Previews || {};
   picked.hidden.clear();
   $('#hiddenInfo').textContent = `${list.length} hidden file${list.length === 1 ? '' : 's'}`;
   renderList('hidden');
@@ -522,8 +548,21 @@ async function moveSelected(tab) {
   }
 }
 
+// Hidden previews live in memory only and are dropped on lock.
+let previews = {};
+const extOf = n => (n.includes('.') ? n.split('.').pop().toUpperCase().slice(0, 4) : 'FILE');
+
+function openPreview(name, b64) {
+  $('#pvImg').src = 'data:image/jpeg;base64,' + b64;
+  $('#pvName').textContent = name;
+  $('#pvModal').hidden = false;
+}
+$('#pvModal').onclick = () => { $('#pvModal').hidden = true; $('#pvImg').removeAttribute('src'); };
+
 function lockHidden() {
   hiddenPin = '';
+  previews = {};
+  $('#pvModal').hidden = true;
   lists.hidden = [];
   picked.hidden.clear();
   $('#hiddenList').innerHTML = '';
