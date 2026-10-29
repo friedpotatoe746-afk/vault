@@ -290,21 +290,28 @@ function ago(iso) {
 }
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-// The save job prints one notice/error annotation per file; read them to show what happened.
+// Each job publishes its outcome as the name of its last step: "RESULT:" + base64url(JSON), e.g.
+// { Saved: [...], Failed: [...], List: ['[...]'] }. Reading step names only needs the Actions permission.
+async function resultOf(run) {
+  const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
+  const step = jobs.flatMap(j => j.steps || []).find(s => s.name.startsWith('RESULT:'));
+  const b64 = step?.name.slice(7) || '';
+  if (!b64) return {};
+  try {
+    const bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+  } catch { return {}; }
+}
+
 async function resultLines(run) {
   if (notes.has(run.id)) return notes.get(run.id);
   try {
-    const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
-    const out = [];
-    for (const job of jobs) {
-      const anns = await gh(`/check-runs/${job.id}/annotations`);
-      for (const a of anns) if (a.title === 'Saved' || a.title === 'Failed') out.push({ ok: a.title === 'Saved', text: a.message });
-    }
+    const r = await resultOf(run);
+    const out = [...(r.Saved || []).map(text => ({ ok: true, text })), ...(r.Failed || []).map(text => ({ ok: false, text }))];
     notes.set(run.id, out);
     return out;
   } catch {
-    notes.set(run.id, null); // annotations not readable with this token — fall back to the run status
-    return null;
+    return null; // try again on the next refresh
   }
 }
 
@@ -353,7 +360,7 @@ for (const b of document.querySelectorAll('.tabs button')) {
 
 // ------------------------------------------------------------ files & hidden files
 // Listing, hiding and unhiding run as a GitHub job ("Manage files"), which can reach Proton Drive
-// with the PC off. Results come back as annotations on that job. One action runs at a time.
+// with the PC off. Results come back through the job's RESULT step. One action runs at a time.
 
 const MANAGE = 'manage.yml';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -366,16 +373,6 @@ function status(tab, text) {
   const box = $(tab === 'files' ? '#filesStatus' : '#hiddenStatus');
   box.hidden = !text;
   if (text) box.querySelector('.txt').textContent = text;
-}
-
-async function annotationsOf(run) {
-  const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
-  const out = [];
-  for (const job of jobs) {
-    try { out.push(...await gh(`/check-runs/${job.id}/annotations`)); }
-    catch { throw new Error('Your token can\'t read results yet: at github.com/settings/personal-access-tokens open "Vault Shortcut" → Edit → add Checks: Read-only → Update.'); }
-  }
-  return out;
 }
 
 async function runManage(tab, inputs, label) {
@@ -396,9 +393,8 @@ async function runManage(tab, inputs, label) {
     if (!run) throw new Error('GitHub didn\'t start the job — try again.');
     while (run.status !== 'completed') { await sleep(3000); run = await gh(`/actions/runs/${run.id}`); }
     if (run.conclusion === 'cancelled') throw new Error('The job was cancelled — another save or action started. Try again.');
-    const anns = await annotationsOf(run);
-    const failedMsgs = anns.filter(a => a.title === 'Failed').map(a => a.message);
-    return { anns, failedMsgs, ok: run.conclusion === 'success' };
+    const res = await resultOf(run);
+    return { res, failedMsgs: res.Failed || [], ok: run.conclusion === 'success' };
   } catch (e) {
     toast(e.message, true);
     return null;
@@ -441,12 +437,12 @@ function updateActions(tab) {
   $(tab === 'files' ? '#hideSelected' : '#unhideSelected').textContent = `${tab === 'files' ? 'Hide' : 'Unhide'} ${n} selected`;
 }
 
-const parseList = (anns, title) => { const a = anns.find(x => x.title === title); try { return a ? JSON.parse(a.message) : null; } catch { return null; } };
+const parseList = (res, title) => { try { return res[title] ? JSON.parse(res[title][0]) : null; } catch { return null; } };
 
 async function refreshFiles() {
   const r = await runManage('files', { action: 'list' }, 'Loading your files');
   if (!r) return;
-  const list = parseList(r.anns, 'List');
+  const list = parseList(r.res, 'List');
   if (!list) return toast(r.failedMsgs[0] || 'Couldn\'t load the list', true);
   lists.files = list;
   picked.files.clear();
@@ -458,7 +454,7 @@ async function refreshFiles() {
 async function refreshHidden() {
   const r = await runManage('hidden', { action: 'list-hidden', pin: hiddenPin }, 'Loading hidden files');
   if (!r) return false;
-  const list = parseList(r.anns, 'HiddenList');
+  const list = parseList(r.res, 'HiddenList');
   if (!list) {
     toast(r.failedMsgs[0] || 'Couldn\'t load hidden files', true);
     if (r.failedMsgs.some(m => /wrong pin/i.test(m))) lockHidden();
@@ -479,7 +475,7 @@ async function moveSelected(tab) {
     `${hide ? 'Hiding' : 'Unhiding'} ${names.length} file${names.length === 1 ? '' : 's'}`);
   if (!r) return;
   if (r.failedMsgs.length) toast(r.failedMsgs[0], true);
-  const done = parseInt((r.anns.find(a => a.title === 'Done')?.message || '0'), 10);
+  const done = parseInt(r.res.Done?.[0] || '0', 10);
   if (done) {
     toast(`${done} file${done === 1 ? '' : 's'} ${hide ? 'hidden' : 'unhidden'}`);
     // Update both lists locally instead of waiting for another minute-long refresh.
