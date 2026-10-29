@@ -113,10 +113,24 @@
   .pv { width: 64px; height: 48px; border-radius: 8px; overflow: hidden; background: var(--panel-2); display: grid; place-items: center; flex: none; }
   .pv img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .pv .glyph { font: 700 10px ui-monospace, monospace; color: var(--muted); letter-spacing: .05em; }
-  .pv-modal { position: fixed; inset: 0; z-index: 20; background: rgba(5,6,9,.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 24px; }
-  .pv-modal img { width: min(480px, 92vw); border-radius: 12px; image-rendering: auto; }
-  .pv-modal .cap { color: #eceef3; font-weight: 600; font-size: 14px; text-align: center; overflow-wrap: anywhere; }
-  .pv-modal .cap.sub { font-weight: 400; font-size: 12.5px; color: #8b91a1; }
+  .play { width: 40px; height: 40px; border-radius: 50%; border: 0; background: var(--panel-2); color: var(--text); display: grid; place-items: center; cursor: pointer; flex: none; -webkit-tap-highlight-color: transparent; }
+  .play svg { width: 16px; height: 16px; fill: currentColor; margin-left: 2px; }
+  .play:active { transform: scale(.94); }
+  .item.with-play { grid-template-columns: auto 1fr auto; }
+  .item.with-pv.with-play { grid-template-columns: auto auto 1fr auto; }
+
+  /* player */
+  .player { position: fixed; inset: 0; z-index: 20; background: #050609; display: grid; grid-template-rows: auto 1fr; color: #eceef3; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  .pbar { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
+  .pbar span { flex: 1; font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pbar button { width: 40px; height: 40px; border-radius: 50%; border: 0; background: rgba(255,255,255,.1); color: #fff; font-size: 18px; cursor: pointer; }
+  .pbody { display: grid; place-items: center; min-height: 0; padding: 0 0 12px; }
+  .pbody > * { grid-area: 1 / 1; }
+  .pbody video, .pbody img { max-width: 100vw; max-height: calc(100vh - 80px); }
+  #plPoster { width: min(480px, 100vw); filter: brightness(.55) blur(1px); }
+  .pstatus { display: flex; align-items: center; gap: 10px; background: rgba(20,22,28,.85); padding: 12px 16px; border-radius: 12px; font-size: 14px; max-width: 86vw; z-index: 1; }
+  .pstatus .spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,.2); border-top-color: #fff; animation: spin .8s linear infinite; flex: none; }
+  .pstatus.err .spin { display: none; }
 </style>
 </head>
 <body>
@@ -192,10 +206,17 @@
   </section>
 </main>
 
-<div id="pvModal" class="pv-modal" hidden>
-  <img id="pvImg" alt="">
-  <div id="pvName" class="cap"></div>
-  <div class="cap sub">Preview only · watch it on the full vault site (PC on) · tap to close</div>
+<div id="player" class="player" hidden>
+  <div class="pbar">
+    <span id="plName"></span>
+    <button id="plClose" aria-label="Close">✕</button>
+  </div>
+  <div class="pbody">
+    <img id="plPoster" alt="" hidden>
+    <video id="plVideo" controls playsinline hidden></video>
+    <img id="plImg" alt="" hidden>
+    <div id="plStatus" class="pstatus"><span class="spin"></span><span class="txt"></span></div>
+  </div>
 </div>
 
 <script>
@@ -550,11 +571,17 @@ function renderList(tab) {
   for (const f of items) {
     const row = document.createElement('label');
     const pv = tab === 'hidden' ? previews[f.n] : null;
-    row.className = 'item' + (tab === 'hidden' ? ' with-pv' : '') + (picked[tab].has(f.n) ? ' sel' : '');
+    const space = tab === 'hidden' ? 'hidden' : 'main';
+    const canPlay = !!mediaKind(f.n);
+    row.className = 'item' + (tab === 'hidden' ? ' with-pv' : '') + (canPlay ? ' with-play' : '') + (picked[tab].has(f.n) ? ' sel' : '');
     row.innerHTML = `<input type="checkbox" ${picked[tab].has(f.n) ? 'checked' : ''}>` +
       (tab === 'hidden' ? `<span class="pv">${pv ? `<img alt="" src="data:image/jpeg;base64,${pv}">` : `<span class="glyph">${esc(extOf(f.n))}</span>`}</span>` : '') +
-      `<div><div class="n"></div><div class="d"></div></div>`;
-    if (pv) row.querySelector('.pv').onclick = e => { e.preventDefault(); openPreview(f.n, pv); }; // don't toggle the tick
+      `<div><div class="n"></div><div class="d"></div></div>` +
+      (canPlay ? `<button class="play" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button>` : '');
+    // Tapping the play button or the preview opens the player (and doesn't toggle the tick).
+    const open = e => { e.preventDefault(); openPlayer(f.n, space, pv); };
+    if (canPlay) row.querySelector('.play').onclick = open;
+    if (pv && canPlay) row.querySelector('.pv').onclick = open;
     row.querySelector('.n').textContent = f.n;
     row.querySelector('.d').textContent = `${fmtSize(f.s)} · ${ago(f.m)}`;
     row.querySelector('input').onchange = e => {
@@ -640,17 +667,99 @@ async function moveSelected(tab) {
 let previews = {};
 const extOf = n => (n.includes('.') ? n.split('.').pop().toUpperCase().slice(0, 4) : 'FILE');
 
-function openPreview(name, b64) {
-  $('#pvImg').src = 'data:image/jpeg;base64,' + b64;
-  $('#pvName').textContent = name;
-  $('#pvModal').hidden = false;
+// ------------------------------------------------------------ player
+// Playing works with the PC off: a GitHub "Watch" job decrypts the file on the fly and serves it
+// through a temporary https link. The link only answers under a random secret made here, which
+// never leaves this page and GitHub. Closing the player stops the stream straight away.
+
+const WATCH = 'watch.yml';
+const mediaKind = n => /\.(mp4|m4v|mov|webm)$/i.test(n) ? 'video' : /\.(jpe?g|png|gif|webp|avif|bmp|heic)$/i.test(n) ? 'image' : /\.(mp3|m4a|wav|aac|ogg|flac)$/i.test(n) ? 'video' : null;
+let watching = null; // { token, run, url, secret } of the open player
+
+function playerStatus(text, err = false) {
+  $('#plStatus').hidden = !text;
+  $('#plStatus').classList.toggle('err', err);
+  if (text) $('#plStatus .txt').textContent = text;
 }
-$('#pvModal').onclick = () => { $('#pvModal').hidden = true; $('#pvImg').removeAttribute('src'); };
+
+async function openPlayer(name, space, previewB64) {
+  closePlayer();
+  const me = { token: Symbol(), run: null, url: null, secret: [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join('') };
+  watching = me;
+  $('#plName').textContent = name;
+  $('#plPoster').hidden = !previewB64;
+  if (previewB64) $('#plPoster').src = 'data:image/jpeg;base64,' + previewB64;
+  $('#plVideo').hidden = $('#plImg').hidden = true;
+  $('#player').hidden = false;
+  const started = Date.now();
+  const tick = () => playerStatus(`Starting a private stream… ${Math.round((Date.now() - started) / 1000)}s (usually 20–30 s)`);
+  tick();
+  const timer = setInterval(tick, 1000);
+  try {
+    const before = new Set((await gh(`/actions/workflows/${WATCH}/runs?per_page=10`)).workflow_runs.map(r => r.id));
+    await gh(`/actions/workflows/${WATCH}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { name, space, pin: space === 'hidden' ? hiddenPin : '', secret: me.secret } }) });
+    while (!me.run) {
+      await sleep(1000);
+      if (watching !== me) return;
+      me.run = (await gh(`/actions/workflows/${WATCH}/runs?per_page=10`)).workflow_runs.find(r => !before.has(r.id)) || null;
+    }
+    for (;;) {
+      await sleep(1000);
+      if (watching !== me) return;
+      const [{ jobs }, run] = await Promise.all([gh(`/actions/runs/${me.run.id}/jobs`), gh(`/actions/runs/${me.run.id}`)]);
+      const step = jobs.flatMap(j => j.steps || []).find(s => /^STREAM:https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(s.name));
+      if (step) { me.url = step.name.slice(7); break; }
+      if (run.status === 'completed') throw new Error(space === 'hidden' ? 'Couldn\'t start — wrong PIN, or the file was moved. Refresh and try again.' : 'Couldn\'t start — the file may have been moved. Refresh and try again.');
+      if (Date.now() - started > 3 * 60_000) throw new Error('This is taking unusually long — try again.');
+    }
+    const src = `${me.url}/${me.secret}/${encodeURIComponent(name)}`;
+    if (mediaKind(name) === 'image') {
+      const img = $('#plImg');
+      img.onload = () => { playerStatus(''); $('#plPoster').hidden = true; };
+      img.onerror = () => playerStatus('Couldn\'t load the photo — try again.', true);
+      img.src = src;
+      img.hidden = false;
+    } else {
+      const v = $('#plVideo');
+      v.oncanplay = () => { playerStatus(''); $('#plPoster').hidden = true; };
+      v.onwaiting = () => playerStatus('Loading…');
+      v.onplaying = () => playerStatus('');
+      v.onerror = () => playerStatus('This video can\'t play here (iPhone plays MP4 and MOV).', true);
+      v.src = src;
+      v.hidden = false;
+      v.play().catch(() => {}); // autoplay may need a tap on iPhone; the controls are there
+    }
+  } catch (e) {
+    if (watching === me) playerStatus(e.message, true);
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+// Stops the stream right away (the job ends within seconds) and cancels the job as a backup.
+function stopStream(w) {
+  if (!w) return;
+  if (w.url) fetch(`${w.url}/${w.secret}/__stop`, { method: 'POST', keepalive: true }).catch(() => {});
+  if (w.run) gh(`/actions/runs/${w.run.id}/cancel`, { method: 'POST', keepalive: true }).catch(() => {});
+}
+
+function closePlayer() {
+  const w = watching;
+  watching = null;
+  const v = $('#plVideo');
+  v.pause(); v.removeAttribute('src'); v.load();
+  $('#plImg').removeAttribute('src');
+  $('#plPoster').removeAttribute('src');
+  $('#player').hidden = true;
+  stopStream(w);
+}
+$('#plClose').onclick = closePlayer;
+window.addEventListener('pagehide', () => stopStream(watching));
 
 function lockHidden() {
   hiddenPin = '';
   previews = {};
-  $('#pvModal').hidden = true;
+  if (watching) closePlayer();
   lists.hidden = [];
   picked.hidden.clear();
   $('#hiddenList').innerHTML = '';
