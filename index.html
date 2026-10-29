@@ -139,7 +139,7 @@
 
     <div id="tab-files" hidden>
       <div id="filesStatus" class="status" hidden><span class="spin"></span><span class="txt"></span></div>
-      <div class="bar"><span class="info" id="filesInfo">Tap Refresh to load your files (about a minute).</span><button class="btn small" id="filesRefresh">Refresh</button></div>
+      <div class="bar"><span class="info" id="filesInfo">Loading your files… (about 15 seconds)</span><button class="btn small" id="filesRefresh">Refresh</button></div>
       <div id="filesList" class="list"></div>
       <div class="sticky" id="filesActions" hidden><button class="btn amber" id="hideSelected">Hide selected</button></div>
     </div>
@@ -147,7 +147,7 @@
     <div id="tab-hidden" hidden>
       <div id="pinBox" class="card">
         <strong>Hidden files</strong>
-        <p class="hint" style="margin-top:4px">Enter your hidden PIN. GitHub checks it, then lists your hidden files (about a minute).</p>
+        <p class="hint" style="margin-top:4px">Enter your hidden PIN. GitHub checks it, then lists your hidden files (about 15 seconds).</p>
         <input id="pin" class="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" style="margin-top:10px">
         <div class="row"><button class="btn amber" id="unlock">Unlock</button></div>
       </div>
@@ -292,15 +292,17 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;'
 
 // Each job publishes its outcome as the name of its last step: "RESULT:" + base64url(JSON), e.g.
 // { Saved: [...], Failed: [...], List: ['[...]'] }. Reading step names only needs the Actions permission.
-async function resultOf(run) {
-  const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
-  const step = jobs.flatMap(j => j.steps || []).find(s => s.name.startsWith('RESULT:'));
-  const b64 = step?.name.slice(7) || '';
+function decodeResult(b64) {
   if (!b64) return {};
   try {
     const bin = atob(b64.replace(/-/g, '+').replace(/_/g, '/'));
     return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
   } catch { return {}; }
+}
+
+async function resultOf(run) {
+  const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
+  return decodeResult(jobs.flatMap(j => j.steps || []).find(s => s.name.startsWith('RESULT:'))?.name.slice(7));
 }
 
 async function resultLines(run) {
@@ -375,34 +377,49 @@ function status(tab, text) {
   if (text) box.querySelector('.txt').textContent = text;
 }
 
-async function runManage(tab, inputs, label) {
-  if (busy) { toast('Wait for the current action to finish', true); return null; }
+async function runManage(tab, inputs, label, { quiet = false } = {}) {
+  if (busy) { if (!quiet) toast('Wait for the current action to finish', true); return null; }
   busy = true;
   const started = Date.now();
-  const tick = () => status(tab, `${label}… ${Math.round((Date.now() - started) / 1000)}s (usually under a minute)`);
+  const tick = () => status(tab, `${label}… ${Math.round((Date.now() - started) / 1000)}s (usually about 15 seconds)`);
   tick();
   const timer = setInterval(tick, 1000);
   try {
     const before = new Set((await gh(`/actions/workflows/${MANAGE}/runs?per_page=10`)).workflow_runs.map(r => r.id));
     await gh(`/actions/workflows/${MANAGE}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs }) });
     let run = null;
-    for (let i = 0; i < 40 && !run; i++) {
-      await sleep(2500);
+    for (let i = 0; i < 90 && !run; i++) {
+      await sleep(1000);
       run = (await gh(`/actions/workflows/${MANAGE}/runs?per_page=10`)).workflow_runs.find(r => !before.has(r.id));
     }
     if (!run) throw new Error('GitHub didn\'t start the job — try again.');
-    while (run.status !== 'completed') { await sleep(3000); run = await gh(`/actions/runs/${run.id}`); }
-    if (run.conclusion === 'cancelled') throw new Error('The job was cancelled — another save or action started. Try again.');
-    const res = await resultOf(run);
-    return { res, failedMsgs: res.Failed || [], ok: run.conclusion === 'success' };
+    // Read the RESULT step as soon as GitHub fills it in — a few seconds before the run is marked done.
+    for (;;) {
+      await sleep(1000);
+      const [{ jobs }, latest] = await Promise.all([gh(`/actions/runs/${run.id}/jobs`), gh(`/actions/runs/${run.id}`)]);
+      const step = jobs.flatMap(j => j.steps || []).find(s => s.name.startsWith('RESULT:'));
+      if (step && step.name.length > 7) {
+        const res = decodeResult(step.name.slice(7));
+        return { res, failedMsgs: res.Failed || [], ok: !(res.Failed || []).length };
+      }
+      if (latest.status === 'completed') {
+        if (latest.conclusion === 'cancelled') throw new Error('The job was cancelled — another save or action started. Try again.');
+        return { res: {}, failedMsgs: ['The job stopped without a result — open it on GitHub to see why.'], ok: false };
+      }
+      if (Date.now() - started > 5 * 60_000) throw new Error('This is taking unusually long — try again in a bit.');
+    }
   } catch (e) {
-    toast(e.message, true);
+    if (!quiet) toast(e.message, true);
     return null;
   } finally {
     clearInterval(timer);
     status(tab, '');
     busy = false;
   }
+}
+
+function saveFilesCache() {
+  try { localStorage.setItem('vault-files', JSON.stringify({ at: Date.now(), list: lists.files })); } catch {}
 }
 
 function fmtSize(b) {
@@ -439,15 +456,18 @@ function updateActions(tab) {
 
 const parseList = (res, title) => { try { return res[title] ? JSON.parse(res[title][0]) : null; } catch { return null; } };
 
-async function refreshFiles() {
-  const r = await runManage('files', { action: 'list' }, 'Loading your files');
+let filesAt = 0; // when the files list was last loaded
+
+async function refreshFiles(opts) {
+  const r = await runManage('files', { action: 'list' }, 'Loading your files', opts);
   if (!r) return;
   const list = parseList(r.res, 'List');
-  if (!list) return toast(r.failedMsgs[0] || 'Couldn\'t load the list', true);
+  if (!list) return opts?.quiet || toast(r.failedMsgs[0] || 'Couldn\'t load the list', true);
   lists.files = list;
-  picked.files.clear();
+  for (const n of [...picked.files]) if (!list.some(f => f.n === n)) picked.files.delete(n); // keep ticks
+  filesAt = Date.now();
   $('#filesInfo').textContent = `${list.length} file${list.length === 1 ? '' : 's'} · updated just now`;
-  try { localStorage.setItem('vault-files', JSON.stringify({ at: Date.now(), list })); } catch {}
+  saveFilesCache();
   renderList('files');
 }
 
@@ -486,6 +506,7 @@ async function moveSelected(tab) {
     picked[tab].clear();
     renderList(tab);
     if (hide ? hiddenPin : true) renderList(other);
+    saveFilesCache();
   }
 }
 
@@ -518,8 +539,19 @@ $('#pin').addEventListener('keydown', e => { if (e.key === 'Enter') $('#unlock')
 // Show the last normal-file list straight away (it isn't secret); hidden lists are never stored.
 try {
   const saved = JSON.parse(localStorage.getItem('vault-files') || 'null');
-  if (saved) { lists.files = saved.list; $('#filesInfo').textContent = `${saved.list.length} files · updated ${ago(new Date(saved.at).toISOString())} — Refresh for the latest`; renderList('files'); }
+  if (saved) {
+    lists.files = saved.list;
+    filesAt = saved.at;
+    $('#filesInfo').textContent = `${saved.list.length} file${saved.list.length === 1 ? '' : 's'} · updated ${ago(new Date(saved.at).toISOString())}`;
+    renderList('files');
+  }
 } catch {}
+
+// Opening the Files tab refreshes the list in the background if it's more than a minute old,
+// so the saved copy shows instantly and quietly updates.
+document.querySelector('.tabs [data-tab="files"]').addEventListener('click', () => {
+  if (token && !busy && Date.now() - filesAt > 60_000) refreshFiles({ quiet: true });
+});
 
 // Leaving the page for a couple of minutes locks hidden files again.
 let awayAt = 0;
