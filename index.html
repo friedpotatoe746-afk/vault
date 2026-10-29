@@ -302,7 +302,7 @@ function decodeResult(b64) {
 
 async function resultOf(run) {
   const { jobs } = await gh(`/actions/runs/${run.id}/jobs`);
-  return decodeResult(jobs.flatMap(j => j.steps || []).find(s => s.name.startsWith('RESULT:'))?.name.slice(7));
+  return decodeResult(jobs.flatMap(j => j.steps || []).find(s => /^RESULT:[A-Za-z0-9_-]+$/.test(s.name))?.name.slice(7));
 }
 
 async function resultLines(run) {
@@ -397,8 +397,10 @@ async function runManage(tab, inputs, label, { quiet = false } = {}) {
     for (;;) {
       await sleep(1000);
       const [{ jobs }, latest] = await Promise.all([gh(`/actions/runs/${run.id}/jobs`), gh(`/actions/runs/${run.id}`)]);
-      const step = jobs.flatMap(j => j.steps || []).find(s => s.name.startsWith('RESULT:'));
-      if (step && step.name.length > 7) {
+      // Before the step runs GitHub shows its name as the unfilled "${{ … }}" template, so only
+      // accept a name that is RESULT: followed by actual base64 data.
+      const step = jobs.flatMap(j => j.steps || []).find(s => /^RESULT:[A-Za-z0-9_-]+$/.test(s.name));
+      if (step) {
         const res = decodeResult(step.name.slice(7));
         return { res, failedMsgs: res.Failed || [], ok: !(res.Failed || []).length };
       }
