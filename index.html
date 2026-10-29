@@ -310,6 +310,16 @@ async function resultLines(run) {
   try {
     const r = await resultOf(run);
     const out = [...(r.Saved || []).map(text => ({ ok: true, text })), ...(r.Failed || []).map(text => ({ ok: false, text }))];
+    // Saves send back the current file list; use it if it's newer than what the Files tab has.
+    const at = new Date(run.updated_at).getTime();
+    const list = parseList(r, 'List');
+    if (list && at > filesAt) {
+      lists.files = list;
+      filesAt = at;
+      $('#filesInfo').textContent = `${list.length} file${list.length === 1 ? '' : 's'} · updated ${ago(run.updated_at)}`;
+      saveFilesCache();
+      renderList('files');
+    }
     notes.set(run.id, out);
     return out;
   } catch {
