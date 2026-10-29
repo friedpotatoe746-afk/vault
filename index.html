@@ -70,6 +70,15 @@
   .toast.err { border-color: var(--danger); }
   .link-btn { background: none; border: 0; color: var(--muted); font-size: 12.5px; text-decoration: underline; cursor: pointer; padding: 0; }
   ol { padding-left: 20px; margin: 8px 0 0; font-size: 13.5px; color: var(--muted); }
+  .switch { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 14px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .switch input { position: absolute; opacity: 0; pointer-events: none; }
+  .switch .track { flex: none; width: 46px; height: 28px; border-radius: 14px; background: var(--panel-2); border: 1px solid var(--line); position: relative; transition: background .15s; }
+  .switch .knob { position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .15s; }
+  .switch input:checked + .track { background: #d4892b; border-color: #d4892b; }
+  .switch input:checked + .track .knob { transform: translateX(18px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch .sub { display: block; font-size: 12px; color: var(--muted); }
+  body.hiding .btn.primary { background: #d4892b; }
   ol li { margin: 4px 0; }
 </style>
 </head>
@@ -97,6 +106,11 @@
   <section id="app" hidden>
     <div class="card">
       <textarea id="links" placeholder="Paste Discord links here — one or many" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+      <label class="switch">
+        <input type="checkbox" id="hidden">
+        <span class="track"><span class="knob"></span></span>
+        <span><b>Save as hidden</b> <span class="sub">encrypted · only visible in the vault's hidden mode</span></span>
+      </label>
       <div class="row">
         <button class="btn ghost" id="paste">Paste</button>
         <button class="btn primary" id="save">Save to Proton</button>
@@ -190,18 +204,23 @@ $('#save').onclick = async () => {
   const links = text.match(/https?:\/\/[^\s<>"']+/g) || [];
   if (!links.length) return toast('Paste a Discord link first', true);
   if (!links.some(l => /discordapp\.(com|net)/.test(l))) return toast('That isn\'t a Discord link — use Share → Copy Link in Discord', true);
-  const btn = $('#save');
+  const btn = $('#save'), hidden = $('#hidden').checked;
   btn.disabled = true; btn.textContent = 'Sending…';
   try {
-    await gh(`/actions/workflows/${WORKFLOW}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { links: links.join('\n') } }) });
+    await gh(`/actions/workflows/${WORKFLOW}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { links: links.join('\n'), hidden: String(hidden) } }) });
     $('#links').value = '';
-    toast(`Saving ${links.length} file${links.length > 1 ? 's' : ''}…`);
+    toast(`Saving ${links.length} file${links.length > 1 ? 's' : ''}${hidden ? ' hidden' : ''}…`);
     setTimeout(loadRuns, 2500);
   } catch (e) {
     toast(e.message, true);
   } finally {
-    btn.disabled = false; btn.textContent = 'Save to Proton';
+    btn.disabled = false; btn.textContent = $('#hidden').checked ? 'Save hidden' : 'Save to Proton';
   }
+};
+
+$('#hidden').onchange = e => {
+  document.body.classList.toggle('hiding', e.target.checked);
+  $('#save').textContent = e.target.checked ? 'Save hidden' : 'Save to Proton';
 };
 
 function ago(iso) {
