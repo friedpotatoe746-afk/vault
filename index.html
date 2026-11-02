@@ -589,9 +589,8 @@ function renderList(tab) {
       `<div><div class="n"></div><div class="d"></div></div>` +
       (canPlay ? `<button class="play" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button>` : '');
     if (thumb) { // shown once it loads; the file-type label stays if there's no picture
-      const img = new Image();
+      const img = new Image(); // not lazy: it isn't in the page until it has loaded
       img.alt = '';
-      img.loading = 'lazy';
       img.onload = () => row.querySelector('.pv').replaceChildren(img);
       img.src = thumb;
     }
