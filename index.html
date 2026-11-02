@@ -119,6 +119,15 @@
   .item.with-play { grid-template-columns: auto 1fr auto; }
   .item.with-pv.with-play { grid-template-columns: auto auto 1fr auto; }
 
+  /* live session badge */
+  .live { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 15px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font: 600 12px system-ui, sans-serif; flex: none; }
+  .live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .live.starting .dot { background: var(--warn); animation: pulse 1s infinite ease-in-out; }
+  .live.ready { color: var(--ok); }
+  .live.ready .dot { background: var(--ok); }
+  .live.failed { color: var(--danger); cursor: pointer; }
+  .live.failed .dot { background: var(--danger); }
+
   /* player */
   .player { position: fixed; inset: 0; z-index: 20; background: #050609; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); color: #eceef3; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
   .pbar { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
@@ -137,10 +146,11 @@
 <main>
   <header>
     <img src="icon.svg" alt="">
-    <div>
+    <div style="flex:1">
       <h1>Vault Saver</h1>
       <p>Discord links → Proton Drive · works with your PC off</p>
     </div>
+    <button id="live" class="live" hidden><span class="dot"></span><span class="txt"></span></button>
   </header>
 
   <section id="setup" class="card" hidden>
@@ -163,7 +173,7 @@
 
     <div id="tab-files" hidden>
       <div id="filesStatus" class="status" hidden><span class="spin"></span><span class="txt"></span></div>
-      <div class="bar"><span class="info" id="filesInfo">Loading your files… (about 15 seconds)</span><button class="btn small" id="filesRefresh">Refresh</button></div>
+      <div class="bar"><span class="info" id="filesInfo">Loading your files…</span><button class="btn small" id="filesRefresh">Refresh</button></div>
       <div id="filesList" class="list"></div>
       <div class="sticky" id="filesActions" hidden><button class="btn amber" id="hideSelected">Hide selected</button></div>
     </div>
@@ -171,7 +181,7 @@
     <div id="tab-hidden" hidden>
       <div id="pinBox" class="card">
         <strong>Hidden files</strong>
-        <p class="hint" style="margin-top:4px">Enter your hidden PIN. GitHub checks it, then lists your hidden files (about 15 seconds).</p>
+        <p class="hint" style="margin-top:4px">Enter your hidden PIN to see your hidden files.</p>
         <input id="pin" class="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" style="margin-top:10px">
         <div class="row"><button class="btn amber" id="unlock">Unlock</button></div>
       </div>
@@ -180,7 +190,7 @@
         <div class="bar"><span class="info" id="hiddenInfo"></span><button class="btn small" id="hiddenRefresh">Refresh</button><button class="btn small" id="lock">Lock</button></div>
         <div id="hiddenList" class="list"></div>
         <div class="sticky" id="hiddenActions" hidden><button class="btn primary" id="unhideSelected">Unhide selected</button></div>
-        <p class="hint">Tap ▶ to watch — works with your PC off. It takes about 20–30 seconds to start.</p>
+        <p class="hint">Tap ▶ or a picture to watch — works with your PC off.</p>
       </div>
     </div>
 
@@ -258,7 +268,7 @@ async function gh(path, opts = {}) {
 function show() {
   $('#setup').hidden = !!token;
   $('#app').hidden = !token;
-  if (token) { loadRuns(); instantFiles(); }
+  if (token) { loadRuns(); instantFiles(); startLive(); }
 }
 
 $('#saveToken').onclick = async () => {
@@ -570,18 +580,24 @@ function renderList(tab) {
   box.innerHTML = items.length ? '' : `<div class="empty">${tab === 'files' ? 'No files.' : 'No hidden files.'}</div>`;
   for (const f of items) {
     const row = document.createElement('label');
-    const pv = tab === 'hidden' ? previews[f.n] : null;
     const space = tab === 'hidden' ? 'hidden' : 'main';
     const canPlay = !!mediaKind(f.n);
-    row.className = 'item' + (tab === 'hidden' ? ' with-pv' : '') + (canPlay ? ' with-play' : '') + (picked[tab].has(f.n) ? ' sel' : '');
+    const thumb = thumbFor(f, space);
+    row.className = 'item with-pv' + (canPlay ? ' with-play' : '') + (picked[tab].has(f.n) ? ' sel' : '');
     row.innerHTML = `<input type="checkbox" ${picked[tab].has(f.n) ? 'checked' : ''}>` +
-      (tab === 'hidden' ? `<span class="pv">${pv ? `<img alt="" src="data:image/jpeg;base64,${pv}">` : `<span class="glyph">${esc(extOf(f.n))}</span>`}</span>` : '') +
+      `<span class="pv"><span class="glyph">${esc(extOf(f.n))}</span></span>` +
       `<div><div class="n"></div><div class="d"></div></div>` +
       (canPlay ? `<button class="play" aria-label="Play"><svg viewBox="0 0 24 24"><path d="M7 4v16l13-8z"/></svg></button>` : '');
-    // Tapping the play button or the preview opens the player (and doesn't toggle the tick).
-    const open = e => { e.preventDefault(); openPlayer(f.n, space, pv); };
-    if (canPlay) row.querySelector('.play').onclick = open;
-    if (pv && canPlay) row.querySelector('.pv').onclick = open;
+    if (thumb) { // shown once it loads; the file-type label stays if there's no picture
+      const img = new Image();
+      img.alt = '';
+      img.loading = 'lazy';
+      img.onload = () => row.querySelector('.pv').replaceChildren(img);
+      img.src = thumb;
+    }
+    // Tapping the play button or the picture opens the player (and doesn't toggle the tick).
+    const open = e => { e.preventDefault(); openPlayer(f.n, space, thumb); };
+    if (canPlay) { row.querySelector('.play').onclick = open; row.querySelector('.pv').onclick = open; }
     row.querySelector('.n').textContent = f.n;
     row.querySelector('.d').textContent = `${fmtSize(f.s)} · ${ago(f.m)}`;
     row.querySelector('input').onchange = e => {
@@ -604,36 +620,159 @@ const parseList = (res, title) => { try { return res[title] ? JSON.parse(res[tit
 
 let filesAt = 0; // when the files list was last loaded
 
+// ------------------------------------------------------------ live session
+// Opening the page starts one private "live session" on GitHub (about 20 s, in the background). It
+// keeps a Proton login open and answers this page directly, so lists, unlocking, hiding and playing
+// take seconds. It only answers under a random secret made here, and closes itself 5 minutes after
+// the page stops using it. Until it's ready, the page shows the newest saved lists.
+
+const WATCH = 'watch.yml';
+const live = { state: 'off', url: '', secret: '', run: null, t: '', ready: null };
+
+function liveBadge() {
+  const b = $('#live');
+  b.hidden = live.state === 'off';
+  b.className = 'live ' + live.state;
+  $('#live .txt').textContent = { starting: 'Connecting…', ready: 'Live', failed: 'Offline — tap to retry' }[live.state] || '';
+}
+
+function startLive() {
+  if (live.state === 'starting' || live.state === 'ready') return live.ready;
+  live.state = 'starting';
+  live.t = '';
+  live.secret = [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join('');
+  liveBadge();
+  live.ready = (async () => {
+    try {
+      const before = new Set((await gh(`/actions/workflows/${WATCH}/runs?per_page=10`)).workflow_runs.map(r => r.id));
+      await gh(`/actions/workflows/${WATCH}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { secret: live.secret } }) });
+      for (let i = 0; i < 90 && !live.run; i++) {
+        await sleep(1000);
+        live.run = (await gh(`/actions/workflows/${WATCH}/runs?per_page=10`)).workflow_runs.find(r => !before.has(r.id)) || null;
+      }
+      if (!live.run) throw new Error('no run');
+      for (let i = 0; i < 180; i++) {
+        await sleep(1000);
+        const [{ jobs }, run] = await Promise.all([gh(`/actions/runs/${live.run.id}/jobs`), gh(`/actions/runs/${live.run.id}`)]);
+        const step = jobs.flatMap(j => j.steps || []).find(s => /^STREAM:https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(s.name));
+        if (step) {
+          live.url = step.name.slice(7);
+          await liveFetch('/ping'); // retries while the new address becomes reachable
+          live.state = 'ready';
+          liveBadge();
+          onLiveReady();
+          return true;
+        }
+        if (run.status === 'completed') throw new Error('ended');
+      }
+      throw new Error('timeout');
+    } catch {
+      live.state = 'failed';
+      liveBadge();
+      return false;
+    }
+  })();
+  return live.ready;
+}
+
+// Talks to the session. The first requests may need a few tries while its address spreads.
+async function liveFetch(path, opts = {}, tries = 8) {
+  for (let i = 0; ; i++) {
+    try {
+      const r = await fetch(`${live.url}/${live.secret}${path}`, opts);
+      if (r.status === 410) { live.state = 'off'; liveBadge(); throw new Error('Session ended'); }
+      return r;
+    } catch (e) {
+      if (i >= tries || /Session ended/.test(e.message)) throw e;
+      await sleep(1500);
+    }
+  }
+}
+const liveJson = async (path, opts) => { const r = await liveFetch(path, opts); const d = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(d.error || `Error ${r.status}`); e.status = r.status; throw e; } return d; };
+const liveUrl = (path, params) => `${live.url}/${live.secret}${path}?` + new URLSearchParams(params);
+const hiddenParams = () => (live.t ? { t: live.t } : {});
+
+// Wait for the session if it's on its way (used when the user taps something before it's ready).
+async function liveOrNull() {
+  if (live.state === 'ready') return true;
+  if (live.state === 'off' || live.state === 'failed') startLive();
+  return (await live.ready) && live.state === 'ready';
+}
+
+async function onLiveReady() {
+  await refreshFiles({ quiet: true });
+  if (hiddenPin) await liveUnlock(hiddenPin).then(ok => ok && refreshHidden({ quiet: true })).catch(() => {});
+  renderList('files');
+}
+
+async function liveUnlock(pin) {
+  try { live.t = (await liveJson('/unlock', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pin }) })).t; return true; }
+  catch (e) { if (e.status === 401) return 'wrong'; return false; }
+}
+
+// Keep the session alive while the page is open and visible; it closes itself 5 minutes after.
+setInterval(() => { if (live.state === 'ready' && !document.hidden) liveFetch('/ping', {}, 1).catch(() => {}); }, 60_000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && token && live.state === 'ready') liveFetch('/ping', {}, 1).catch(() => { live.state = 'off'; liveBadge(); startLive(); });
+});
+$('#live').onclick = () => { if (live.state === 'failed' || live.state === 'off') startLive(); };
+
+// ------------------------------------------------------------ files & hidden lists
+
 async function refreshFiles(opts) {
-  const r = await runManage('files', { action: 'list' }, lists.files.length ? 'Checking for changes' : 'Loading your files', opts);
-  if (!r) return;
-  const list = parseList(r.res, 'List');
-  if (!list) {
-    $('#filesInfo').textContent = lists.files.length ? 'Couldn\'t check for changes — tap Refresh' : 'Couldn\'t load your files — tap Refresh';
-    return opts?.quiet || toast(r.failedMsgs[0] || 'Couldn\'t load the list', true);
+  let list = null;
+  if (live.state === 'ready' || (live.state === 'starting' && !opts?.quiet)) {
+    status('files', live.state === 'ready' ? 'Loading…' : 'Connecting… (only the first time, about 20 s)');
+    try { if (await liveOrNull()) list = (await liveJson('/list?space=main')).files; } catch {}
+    status('files', '');
+  }
+  if (!list) { // fallback: a one-off GitHub job
+    const r = await runManage('files', { action: 'list' }, lists.files.length ? 'Checking for changes' : 'Loading your files', opts);
+    list = r && parseList(r.res, 'List');
+    if (!list) {
+      $('#filesInfo').textContent = lists.files.length ? 'Couldn\'t check for changes — tap Refresh' : 'Couldn\'t load your files — tap Refresh';
+      if (!opts?.quiet) toast(r?.failedMsgs[0] || 'Couldn\'t load the list', true);
+      return;
+    }
   }
   lists.files = list;
   for (const n of [...picked.files]) if (!list.some(f => f.n === n)) picked.files.delete(n); // keep ticks
   filesAt = Date.now();
-  $('#filesInfo').textContent = `${list.length} file${list.length === 1 ? '' : 's'} · updated just now`;
+  $('#filesInfo').textContent = `${list.length} file${list.length === 1 ? '' : 's'} · up to date`;
   saveFilesCache();
   renderList('files');
 }
 
 async function refreshHidden(opts) {
-  const r = await runManage('hidden', { action: 'list-hidden', pin: hiddenPin }, lists.hidden.length ? 'Checking for changes' : 'Loading hidden files', opts);
-  if (!r) return false;
-  const list = parseList(r.res, 'HiddenList');
-  if (!list) {
-    if (r.failedMsgs.some(m => /wrong pin/i.test(m))) { toast('Wrong PIN', true); lockHidden(); return false; }
-    $('#hiddenInfo').textContent = 'Couldn\'t check for changes — tap Refresh';
-    if (!opts?.quiet) toast(r.failedMsgs[0] || 'Couldn\'t load hidden files', true);
-    return false;
+  let list = null;
+  if (live.state === 'ready' || live.state === 'starting') {
+    if (!opts?.quiet) status('hidden', live.state === 'ready' ? 'Loading…' : 'Connecting… (only the first time, about 20 s)');
+    try {
+      if (await liveOrNull()) {
+        if (!live.t) {
+          const ok = await liveUnlock(hiddenPin);
+          if (ok === 'wrong') { status('hidden', ''); toast('Wrong PIN', true); lockHidden(); return false; }
+        }
+        if (live.t) list = (await liveJson('/list?' + new URLSearchParams({ space: 'hidden', ...hiddenParams() }))).files;
+      }
+    } catch {}
+    status('hidden', '');
+  }
+  if (!list) { // fallback: a one-off GitHub job (also makes previews)
+    const r = await runManage('hidden', { action: 'list-hidden', pin: hiddenPin }, lists.hidden.length ? 'Checking for changes' : 'Loading hidden files', opts);
+    if (!r) return false;
+    list = parseList(r.res, 'HiddenList');
+    if (!list) {
+      if (r.failedMsgs.some(m => /wrong pin/i.test(m))) { toast('Wrong PIN', true); lockHidden(); return false; }
+      $('#hiddenInfo').textContent = 'Couldn\'t check for changes — tap Refresh';
+      if (!opts?.quiet) toast(r.failedMsgs[0] || 'Couldn\'t load hidden files', true);
+      return false;
+    }
+    previews = { ...previews, ...(r.res.Previews || {}) };
   }
   lists.hidden = list;
-  previews = { ...previews, ...(r.res.Previews || {}) };
-  picked.hidden.clear();
-  $('#hiddenInfo').textContent = `${list.length} hidden file${list.length === 1 ? '' : 's'}`;
+  for (const n of [...picked.hidden]) if (!list.some(f => f.n === n)) picked.hidden.delete(n);
+  $('#hiddenInfo').textContent = `${list.length} hidden file${list.length === 1 ? '' : 's'} · up to date`;
   renderList('hidden');
   return true;
 }
@@ -642,39 +781,51 @@ async function moveSelected(tab) {
   const names = [...picked[tab]];
   if (!names.length) return;
   const hide = tab === 'files';
-  const r = await runManage(tab, { action: hide ? 'hide' : 'unhide', names: names.join('\n'), pin: hiddenPin },
-    `${hide ? 'Hiding' : 'Unhiding'} ${names.length} file${names.length === 1 ? '' : 's'}`);
-  if (!r) return;
-  if (r.failedMsgs.length) toast(r.failedMsgs[0], true);
-  const done = parseInt(r.res.Done?.[0] || '0', 10);
+  const label = `${hide ? 'Hiding' : 'Unhiding'} ${names.length} file${names.length === 1 ? '' : 's'}`;
+  if (hide && !hiddenPin) return toast('Unlock the 🔒 Hidden tab first, then hide files', true);
+  let files = null, hidden = null, done = 0;
+  if (await liveOrNull().catch(() => false)) {
+    status(tab, label + '…');
+    try {
+      if (!live.t) await liveUnlock(hiddenPin);
+      const r = await liveJson('/move?' + new URLSearchParams(hiddenParams()), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ names, to: hide ? 'hidden' : 'main' }) });
+      ({ files, hidden, done } = r);
+    } catch (e) { toast(`${hide ? 'Hide' : 'Unhide'} failed: ${e.message}`, true); }
+    status(tab, '');
+  } else { // fallback: a one-off GitHub job
+    const r = await runManage(tab, { action: hide ? 'hide' : 'unhide', names: names.join('\n'), pin: hiddenPin }, label);
+    if (!r) return;
+    if (r.failedMsgs.length) toast(r.failedMsgs[0], true);
+    done = parseInt(r.res.Done?.[0] || '0', 10);
+    files = parseList(r.res, 'List'); hidden = parseList(r.res, 'HiddenList');
+  }
   if (!done) return;
   toast(`${done} file${done === 1 ? '' : 's'} ${hide ? 'hidden' : 'unhidden'}`);
   picked[tab].clear();
-  // The job sends both lists as they are now; fall back to updating locally if one is missing.
-  const files = parseList(r.res, 'List'), hidden = parseList(r.res, 'HiddenList');
   const moved = lists[tab].filter(f => names.includes(f.n));
   lists.files = files || (hide ? lists.files.filter(f => !names.includes(f.n)) : [...lists.files, ...moved]);
-  if (hiddenPin) lists.hidden = hidden || (hide ? [...lists.hidden, ...moved] : lists.hidden.filter(f => !names.includes(f.n)));
+  lists.hidden = hidden || (hide ? [...lists.hidden, ...moved] : lists.hidden.filter(f => !names.includes(f.n)));
   filesAt = Date.now();
   saveFilesCache();
   renderList('files');
-  if (hiddenPin) renderList('hidden');
-  // Newly hidden files need previews made; fetch them quietly in the background.
-  if (hide && hiddenPin) refreshHidden({ quiet: true });
+  renderList('hidden');
 }
 
-// Hidden previews live in memory only and are dropped on lock.
+// Hidden previews (from GitHub jobs) live in memory only and are dropped on lock.
 let previews = {};
 const extOf = n => (n.includes('.') ? n.split('.').pop().toUpperCase().slice(0, 4) : 'FILE');
 
-// ------------------------------------------------------------ player
-// Playing works with the PC off: a GitHub "Watch" job decrypts the file on the fly and serves it
-// through a temporary https link. The link only answers under a random secret made here, which
-// never leaves this page and GitHub. Closing the player stops the stream straight away.
+// The row picture: a stored preview if we have one, else (once live) one served by the session.
+function thumbFor(f, space) {
+  if (space === 'hidden' && previews[f.n]) return 'data:image/jpeg;base64,' + previews[f.n];
+  if (live.state !== 'ready' || !mediaKind(f.n) || (space === 'hidden' && !live.t)) return null;
+  return liveUrl('/thumb', { space, name: f.n, s: f.s, ...(space === 'hidden' ? hiddenParams() : {}) });
+}
 
-const WATCH = 'watch.yml';
+// ------------------------------------------------------------ player
+
 const mediaKind = n => /\.(mp4|m4v|mov|webm)$/i.test(n) ? 'video' : /\.(jpe?g|png|gif|webp|avif|bmp|heic)$/i.test(n) ? 'image' : /\.(mp3|m4a|wav|aac|ogg|flac)$/i.test(n) ? 'video' : null;
-let watching = null; // { token, run, url, secret } of the open player
+let playing = null; // name of the open file
 
 function playerStatus(text, err = false) {
   $('#plStatus').hidden = !text;
@@ -682,84 +833,61 @@ function playerStatus(text, err = false) {
   if (text) $('#plStatus .txt').textContent = text;
 }
 
-async function openPlayer(name, space, previewB64) {
+async function openPlayer(name, space, poster) {
   closePlayer();
-  const me = { token: Symbol(), run: null, url: null, secret: [...crypto.getRandomValues(new Uint8Array(24))].map(b => b.toString(16).padStart(2, '0')).join('') };
-  watching = me;
+  const me = Symbol();
+  playing = me;
   $('#plName').textContent = name;
-  $('#plPoster').hidden = !previewB64;
-  if (previewB64) $('#plPoster').src = 'data:image/jpeg;base64,' + previewB64;
+  $('#plPoster').hidden = !poster;
+  if (poster) $('#plPoster').src = poster;
   $('#plVideo').hidden = $('#plImg').hidden = true;
   $('#player').hidden = false;
   const started = Date.now();
-  const tick = () => playerStatus(`Starting a private stream… ${Math.round((Date.now() - started) / 1000)}s (usually 20–30 s)`);
+  const tick = () => playerStatus(live.state === 'ready' ? 'Loading…' : `Connecting… ${Math.round((Date.now() - started) / 1000)}s (only the first time, about 20 s)`);
   tick();
   const timer = setInterval(tick, 1000);
   try {
-    const before = new Set((await gh(`/actions/workflows/${WATCH}/runs?per_page=10`)).workflow_runs.map(r => r.id));
-    await gh(`/actions/workflows/${WATCH}/dispatches`, { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { name, space, pin: space === 'hidden' ? hiddenPin : '', secret: me.secret } }) });
-    while (!me.run) {
-      await sleep(1000);
-      if (watching !== me) return;
-      me.run = (await gh(`/actions/workflows/${WATCH}/runs?per_page=10`)).workflow_runs.find(r => !before.has(r.id)) || null;
-    }
-    for (;;) {
-      await sleep(1000);
-      if (watching !== me) return;
-      const [{ jobs }, run] = await Promise.all([gh(`/actions/runs/${me.run.id}/jobs`), gh(`/actions/runs/${me.run.id}`)]);
-      const step = jobs.flatMap(j => j.steps || []).find(s => /^STREAM:https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(s.name));
-      if (step) { me.url = step.name.slice(7); break; }
-      if (run.status === 'completed') throw new Error(space === 'hidden' ? 'Couldn\'t start — wrong PIN, or the file was moved. Refresh and try again.' : 'Couldn\'t start — the file may have been moved. Refresh and try again.');
-      if (Date.now() - started > 3 * 60_000) throw new Error('This is taking unusually long — try again.');
-    }
-    const src = `${me.url}/${me.secret}/${encodeURIComponent(name)}`;
+    if (!(await liveOrNull())) throw new Error('Couldn\'t connect — check your internet and try again.');
+    if (playing !== me) return;
+    if (space === 'hidden' && !live.t && (await liveUnlock(hiddenPin)) !== true) throw new Error('Hidden files are locked — unlock again.');
+    const src = liveUrl('/file', { space, name, ...(space === 'hidden' ? hiddenParams() : {}) });
     if (mediaKind(name) === 'image') {
       const img = $('#plImg');
-      img.onload = () => { playerStatus(''); $('#plPoster').hidden = true; };
-      img.onerror = () => playerStatus('Couldn\'t load the photo — try again.', true);
+      img.onload = () => { if (playing === me) { clearInterval(timer); playerStatus(''); $('#plPoster').hidden = true; } };
+      img.onerror = () => { clearInterval(timer); playerStatus('Couldn\'t load the photo — try again.', true); };
       img.src = src;
       img.hidden = false;
     } else {
       const v = $('#plVideo');
-      v.oncanplay = () => { playerStatus(''); $('#plPoster').hidden = true; };
+      v.oncanplay = () => { if (playing === me) { clearInterval(timer); playerStatus(''); $('#plPoster').hidden = true; } };
       v.onwaiting = () => playerStatus('Loading…');
       v.onplaying = () => playerStatus('');
-      v.onerror = () => playerStatus('This video can\'t play here (iPhone plays MP4 and MOV).', true);
+      v.onerror = () => { clearInterval(timer); playerStatus('This video can\'t play here (iPhone plays MP4 and MOV).', true); };
       v.src = src;
       v.hidden = false;
       v.play().catch(() => {}); // autoplay may need a tap on iPhone; the controls are there
     }
   } catch (e) {
-    if (watching === me) playerStatus(e.message, true);
-  } finally {
     clearInterval(timer);
+    if (playing === me) playerStatus(e.message, true);
   }
 }
 
-// Stops the stream right away (the job ends within seconds) and cancels the job as a backup.
-function stopStream(w) {
-  if (!w) return;
-  if (w.url) fetch(`${w.url}/${w.secret}/__stop`, { method: 'POST', keepalive: true }).catch(() => {});
-  if (w.run) gh(`/actions/runs/${w.run.id}/cancel`, { method: 'POST', keepalive: true }).catch(() => {});
-}
-
 function closePlayer() {
-  const w = watching;
-  watching = null;
+  playing = null;
   const v = $('#plVideo');
   v.pause(); v.removeAttribute('src'); v.load();
   $('#plImg').removeAttribute('src');
   $('#plPoster').removeAttribute('src');
   $('#player').hidden = true;
-  stopStream(w);
 }
 $('#plClose').onclick = closePlayer;
-window.addEventListener('pagehide', () => stopStream(watching));
 
 function lockHidden() {
   hiddenPin = '';
+  live.t = '';
   previews = {};
-  if (watching) closePlayer();
+  if (playing) closePlayer();
   lists.hidden = [];
   picked.hidden.clear();
   $('#hiddenList').innerHTML = '';
@@ -768,21 +896,35 @@ function lockHidden() {
   $('#pin').value = '';
 }
 
-$('#filesRefresh').onclick = refreshFiles;
+$('#filesRefresh').onclick = () => refreshFiles();
 $('#hideSelected').onclick = () => moveSelected('files');
 $('#unhideSelected').onclick = () => moveSelected('hidden');
-$('#hiddenRefresh').onclick = refreshHidden;
+$('#hiddenRefresh').onclick = () => refreshHidden();
 $('#lock').onclick = () => { lockHidden(); toast('Hidden files locked'); };
 $('#unlock').onclick = async () => {
   const pin = $('#pin').value.trim();
   if (!pin) return $('#pin').focus();
   $('#unlock').disabled = true;
+  // Fastest path: the live session checks the PIN and lists in about a second.
+  if (live.state === 'ready') {
+    const ok = await liveUnlock(pin);
+    $('#unlock').disabled = false;
+    if (ok === 'wrong') return toast('Wrong PIN', true);
+    if (ok === true) {
+      hiddenPin = pin;
+      $('#pinBox').hidden = true;
+      $('#hiddenArea').hidden = false;
+      return refreshHidden();
+    }
+  }
+  // Otherwise show the newest saved hidden list at once (checked against its PIN fingerprint),
+  // and freshen it as soon as the session is up.
   const instant = await instantHidden(pin);
   $('#unlock').disabled = false;
   hiddenPin = pin;
   $('#pinBox').hidden = true;
   $('#hiddenArea').hidden = false;
-  if (instant) { refreshHidden({ quiet: true }); return; } // shown already; freshen in the background
+  if (instant) { refreshHidden({ quiet: true }); return; }
   $('#hiddenInfo').textContent = '';
   if (!(await refreshHidden())) lockHidden();
 };
@@ -799,12 +941,11 @@ try {
   }
 } catch {}
 
-// Opening the Files tab shows the newest known list at once and, if it's over a minute old,
-// checks for changes in the background.
+// Opening the Files tab shows the newest known list at once; the live session refreshes it.
 document.querySelector('.tabs [data-tab="files"]').addEventListener('click', async () => {
   if (!token) return;
+  if (live.state === 'ready') return refreshFiles({ quiet: true });
   await instantFiles();
-  if (!busy && Date.now() - filesAt > 60_000) refreshFiles({ quiet: true });
 });
 
 // Leaving the page for a couple of minutes locks hidden files again.
